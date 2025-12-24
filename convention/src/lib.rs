@@ -8,7 +8,7 @@ pub mod settlement;
 pub mod event;
 pub mod objects;
 
-use settlement::*;
+pub use settlement::*;
 
 pub trait CommonState: Serialize + StorageData + Sized {
     type PlayerData: StorageData + Default + Serialize;
@@ -52,5 +52,3 @@ pub trait CommonState: Serialize + StorageData + Sized {
         }
     }
 }
-
-

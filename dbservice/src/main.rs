@@ -159,6 +159,7 @@ fn main() -> std::io::Result<()> {
 }
 
 #[test]
+#[ignore = "requires MongoDB (network sockets)"]
 fn update_leaf_test() {
     let request = UpdateLeafRequest {
         root: [
