@@ -75,7 +75,8 @@ impl State {
         }
     }
     pub fn preempt() -> bool {
-        return Self::get_global().tick % 5 == 0
+        const PREEMPT_TICK_INTERVAL: u64 = 100;
+        Self::get_global().tick % PREEMPT_TICK_INTERVAL == 0
     }
 
     pub fn store() {
