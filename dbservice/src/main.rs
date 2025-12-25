@@ -9,7 +9,7 @@ use zkwasm_host_circuits::host::datahash::MongoDataHash;
 use zkwasm_host_circuits::host::db::RocksDB;
 use zkwasm_host_circuits::host::db::TreeDB;
 use zkwasm_host_circuits::host::merkle::MerkleTree;
-use zkwasm_host_circuits::host::mongomerkle::MongoMerkle;
+use zkwasm_host_circuits::host::mongomerkle::{MongoMerkle, DEFAULT_HASH_VEC};
 use zkwasm_host_circuits::constants::MERKLE_DEPTH;
 
 use std::sync::OnceLock;
@@ -187,27 +187,22 @@ fn main() -> std::io::Result<()> {
 }
 
 #[test]
-#[ignore = "requires MongoDB (network sockets)"]
 fn update_leaf_test() {
-    let request = UpdateLeafRequest {
-        root: [
-            209, 25, 6, 57, 202, 38, 63, 205, 230, 191, 218, 42, 142, 209, 137, 151, 3, 59, 129,
-            218, 89, 249, 19, 143, 222, 94, 61, 88, 8, 55, 104, 39,
-        ],
-        data: [
-            46, 49, 43, 246, 232, 24, 211, 241, 73, 195, 156, 126, 82, 150, 152, 41, 162, 86, 181,
-            181, 123, 175, 165, 155, 192, 168, 58, 5, 211, 77, 237, 5,
-        ],
-        index: "4294967296".to_string(),
-    };
-    println!(
-        "update leaf {:?} {:?} {:?}",
-        request.root, request.data, request.index
-    );
-    let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
-    let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], request.root, None);
-    println!("update leaf processing ");
-    mt.update_leaf_data_with_proof(index, &request.data.to_vec())
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Rc::new(RefCell::new(RocksDB::new(tmp.path()).unwrap()));
+
+    let root = DEFAULT_HASH_VEC[MERKLE_DEPTH];
+    let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], root, Some(db));
+
+    let index = 2_u64.pow(MERKLE_DEPTH as u32) - 1;
+    let data = [0x2eu8; 32];
+
+    let proof = mt
+        .update_leaf_data_with_proof(index, &data.to_vec())
         .unwrap();
-    println!("update leaf done");
+    assert_eq!(mt.get_root_hash(), proof.root);
+
+    let (leaf, leaf_proof) = mt.get_leaf_with_proof(index).unwrap();
+    assert_eq!(leaf.data.unwrap_or([0; 32]), data);
+    assert!(mt.verify_proof(&leaf_proof).unwrap());
 }
