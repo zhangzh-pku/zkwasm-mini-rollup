@@ -10,7 +10,7 @@ use zkwasm_host_circuits::host::db::RocksDB;
 use zkwasm_host_circuits::host::db::TreeDB;
 use zkwasm_host_circuits::host::merkle::MerkleTree;
 use zkwasm_host_circuits::host::mongomerkle::MongoMerkle;
-use zkwasm_host_circuits::proof::MERKLE_DEPTH;
+use zkwasm_host_circuits::constants::MERKLE_DEPTH;
 
 use std::time::Instant;
 
