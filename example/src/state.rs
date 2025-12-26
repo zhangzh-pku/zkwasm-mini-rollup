@@ -32,7 +32,8 @@ pub type HelloWorldPlayer = Player<PlayerData>;
 
 #[derive(Serialize, Default)]
 pub struct State {
-    tick: u64
+    tick: u64,
+    tx_count: u64,
 }
 
 pub struct SafeState(pub RefCell<State>);
@@ -55,12 +56,22 @@ impl CommonState for State {
 
 impl StorageData for State {
     fn from_data(u64data: &mut IterMut<u64>) -> Self {
+        let tick = match u64data.next() {
+            Some(v) => *v,
+            None => 0,
+        };
+        let tx_count = match u64data.next() {
+            Some(v) => *v,
+            None => 0,
+        };
         State {
-            tick: *u64data.next().unwrap()
+            tick,
+            tx_count,
         }
     }
     fn to_data(&self, data: &mut Vec<u64>) {
         data.push(self.tick);
+        data.push(self.tx_count);
     }
 }
 
@@ -71,12 +82,14 @@ impl State {
     }
     pub fn new() -> Self {
         State {
-            tick: 0
+            tick: 0,
+            tx_count: 0,
         }
     }
     pub fn preempt() -> bool {
-        const PREEMPT_TICK_INTERVAL: u64 = 100;
-        Self::get_global().tick % PREEMPT_TICK_INTERVAL == 0
+        const PREEMPT_TX_INTERVAL: u64 = 100;
+        let tx_count = Self::get_global().tx_count;
+        tx_count != 0 && tx_count % PREEMPT_TX_INTERVAL == 0
     }
 
     pub fn store() {
@@ -139,6 +152,7 @@ impl Transaction {
             INC_COUNTER => self.inc_counter(pkey),
             _ => 0,
         };
+        State::get_global_mut().tx_count += 1;
         let kvpair = unsafe { &mut MERKLE_MAP.merkle.root };
         zkwasm_rust_sdk::dbg!("root after process {:?}\n", kvpair);
         vec![b as u64]
