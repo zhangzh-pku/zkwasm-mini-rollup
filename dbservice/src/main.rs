@@ -156,6 +156,17 @@ pub struct ResetSessionRequest {
     session: String,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+pub struct CommitSessionRequest {
+    session: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct CommitSessionResponse {
+    merkle_records: u64,
+    data_records: u64,
+}
+
 fn sessions() -> &'static Mutex<HashMap<String, Arc<Mutex<OverlayState>>>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -222,6 +233,53 @@ async fn reset_session(Params(request): Params<ResetSessionRequest>) -> Result<b
     guard.merkle.clear();
     guard.data.clear();
     Ok(true)
+}
+
+async fn commit_session(
+    Params(request): Params<CommitSessionRequest>,
+) -> Result<CommitSessionResponse, Error> {
+    let overlay = sessions()
+        .lock()
+        .map_err(|_| Error::INTERNAL_ERROR)?
+        .get(&request.session)
+        .cloned();
+    let Some(overlay) = overlay else {
+        return Err(Error::INVALID_PARAMS);
+    };
+
+    actix_web::web::block(move || -> Result<CommitSessionResponse, Error> {
+        let (merkle, data) = {
+            let mut guard = overlay
+                .lock()
+                .map_err(|_| Error::INTERNAL_ERROR)?;
+            let merkle = std::mem::take(&mut guard.merkle);
+            let data = std::mem::take(&mut guard.data);
+            (merkle, data)
+        };
+
+        let merkle_records: Vec<MerkleRecord> = merkle.into_values().flatten().collect();
+        let data_records: Vec<DataHashRecord> = data.into_values().flatten().collect();
+
+        let mut base = DB.get().expect("DB not initialized").clone();
+        base.set_merkle_records(&merkle_records)
+            .map_err(|e| {
+                println!("commit_session: set_merkle_records error {:?}", e);
+                Error::INTERNAL_ERROR
+            })?;
+        for record in data_records.iter().cloned() {
+            base.set_data_record(record).map_err(|e| {
+                println!("commit_session: set_data_record error {:?}", e);
+                Error::INTERNAL_ERROR
+            })?;
+        }
+
+        Ok(CommitSessionResponse {
+            merkle_records: merkle_records.len() as u64,
+            data_records: data_records.len() as u64,
+        })
+    })
+    .await
+    .map_err(|_| Error::INTERNAL_ERROR)?
 }
 
 async fn update_leaf(Params(request): Params<UpdateLeafRequest>) -> Result<[u8; 32], Error> {
@@ -343,6 +401,7 @@ fn main() -> std::io::Result<()> {
         .with_method("begin_session", begin_session)
         .with_method("drop_session", drop_session)
         .with_method("reset_session", reset_session)
+        .with_method("commit_session", commit_session)
         .with_method("update_leaf", update_leaf)
         .with_method("get_leaf", get_leaf)
         .with_method("update_record", update_record)
