@@ -289,21 +289,17 @@ async fn update_leaf(Params(request): Params<UpdateLeafRequest>) -> Result<[u8; 
         None
     };
     let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
-    let hash = actix_web::web::block(move || {
-        let mut mt = get_mt(request.root, request.session)?;
-        mt.update_leaf_data_with_proof(index, &request.data.to_vec())
-            .map_err(|e| {
-                println!("update leaf data with proof error {:?}", e);
-                Error::INTERNAL_ERROR
-            })?;
-        Ok(mt.get_root_hash())
-    })
-    .await
-    .map_err(|_| Error::INTERNAL_ERROR)?;
+    let mut mt = get_mt(request.root, request.session)?;
+    mt.update_leaf_data_with_proof(index, &request.data.to_vec())
+        .map_err(|e| {
+            println!("update leaf data with proof error {:?}", e);
+            Error::INTERNAL_ERROR
+        })?;
+    let hash = mt.get_root_hash();
     if let Some(start) = start {
         println!("time taken for update_leaf is {:?}", start.elapsed());
     }
-    hash
+    Ok(hash)
 }
 
 async fn get_leaf(Params(request): Params<GetLeafRequest>) -> Result<[u8; 32], Error> {
@@ -313,62 +309,46 @@ async fn get_leaf(Params(request): Params<GetLeafRequest>) -> Result<[u8; 32], E
         None
     };
     let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
-    let leaf = actix_web::web::block(move || {
-        let mt = get_mt(request.root, request.session)?;
-        let (leaf, _) = mt.get_leaf_with_proof(index).map_err(|e| {
-            println!("get leaf error {:?}", e);
-            Error::INTERNAL_ERROR
-        })?;
-        Ok(leaf)
-    })
-    .await
-    .map_err(|_| Error::INTERNAL_ERROR)?;
+    let mt = get_mt(request.root, request.session)?;
+    let (leaf, _) = mt.get_leaf_with_proof(index).map_err(|e| {
+        println!("get leaf error {:?}", e);
+        Error::INTERNAL_ERROR
+    })?;
     if let Some(start) = start {
         println!("time taken for get_leaf is {:?}", start.elapsed());
     }
-    leaf.map(|l| {
-        l.data.unwrap_or([0; 32])
-    })
+    Ok(leaf.data.unwrap_or([0; 32]))
 }
 async fn update_record(Params(request): Params<UpdateRecordRequest>) -> Result<(), Error> {
-    actix_web::web::block(move || -> Result<(), Error> {
-        let db = get_db(request.session)?;
-        let mut mongo_datahash = MongoDataHash::construct([0; 32], Some(db));
-        mongo_datahash
-            .update_record(DataHashRecord {
-                hash: request.hash,
-                data: request
-                    .data
-                    .iter()
-                    .map(|x| {
-                        let x = u64::from_str_radix(x, 10).unwrap();
-                        x.to_le_bytes()
-                    })
-                    .flatten()
-                    .collect::<Vec<u8>>(),
-            })
-            .map_err(|e| {
-                println!("update record error {:?}", e);
-                Error::INTERNAL_ERROR
-            })?;
-        Ok(())
-    })
-    .await
-    .map_err(|_| Error::INTERNAL_ERROR)??;
+    let db = get_db(request.session)?;
+    let mut mongo_datahash = MongoDataHash::construct([0; 32], Some(db));
+    mongo_datahash
+        .update_record(DataHashRecord {
+            hash: request.hash,
+            data: request
+                .data
+                .iter()
+                .map(|x| {
+                    let x = u64::from_str_radix(x, 10).unwrap();
+                    x.to_le_bytes()
+                })
+                .flatten()
+                .collect::<Vec<u8>>(),
+        })
+        .map_err(|e| {
+            println!("update record error {:?}", e);
+            Error::INTERNAL_ERROR
+        })?;
     Ok(())
 }
 
 async fn get_record(Params(request): Params<GetRecordRequest>) -> Result<Vec<String>, Error> {
-    let datahashrecord = actix_web::web::block(move || -> Result<Option<DataHashRecord>, Error> {
-        let db = get_db(request.session)?;
-        let mongo_datahash = MongoDataHash::construct([0; 32], Some(db));
-        mongo_datahash.get_record(&request.hash).map_err(|e| {
-            println!("get record error {:?}", e);
-            Error::INTERNAL_ERROR
-        })
-    })
-    .await
-    .map_err(|_| Error::INTERNAL_ERROR)??;
+    let db = get_db(request.session)?;
+    let mongo_datahash = MongoDataHash::construct([0; 32], Some(db));
+    let datahashrecord = mongo_datahash.get_record(&request.hash).map_err(|e| {
+        println!("get record error {:?}", e);
+        Error::INTERNAL_ERROR
+    })?;
     let data = datahashrecord.map_or(vec![], |r| {
         r.data
             .chunks_exact(8)
