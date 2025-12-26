@@ -141,6 +141,33 @@ pub struct GetRecordRequest {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyTxsRequest {
+    session: Option<String>,
+    root: [u8; 32],
+    txs: Vec<ApplyTxTrace>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyTxTrace {
+    writes: Vec<ApplyLeafWrite>,
+    update_records: Vec<ApplyRecordUpdate>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ApplyLeafWrite {
+    index: String,
+    data: [u8; 32],
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ApplyRecordUpdate {
+    hash: [u8; 32],
+    data: Vec<String>, // vec u64 string
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 pub struct PingRequest {}
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -360,6 +387,60 @@ async fn get_record(Params(request): Params<GetRecordRequest>) -> Result<Vec<Str
     Ok(data)
 }
 
+async fn apply_txs(Params(request): Params<ApplyTxsRequest>) -> Result<Vec<[u8; 32]>, Error> {
+    let start = if log_csm_latency() {
+        Some(Instant::now())
+    } else {
+        None
+    };
+
+    let db = get_db(request.session)?;
+    let mut mongo_datahash = MongoDataHash::construct([0; 32], Some(db.clone()));
+    let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], request.root, Some(db));
+
+    let mut roots: Vec<[u8; 32]> = Vec::with_capacity(request.txs.len());
+    for tx in request.txs.iter() {
+        for rec in tx.update_records.iter() {
+            mongo_datahash
+                .update_record(DataHashRecord {
+                    hash: rec.hash,
+                    data: rec
+                        .data
+                        .iter()
+                        .map(|x| {
+                            let x = u64::from_str_radix(x, 10).map_err(|_| Error::INVALID_PARAMS)?;
+                            Ok(x.to_le_bytes())
+                        })
+                        .collect::<Result<Vec<[u8; 8]>, Error>>()?
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<u8>>(),
+                })
+                .map_err(|e| {
+                    println!("apply_txs update_record error {:?}", e);
+                    Error::INTERNAL_ERROR
+                })?;
+        }
+
+        for w in tx.writes.iter() {
+            let index = u64::from_str_radix(w.index.as_str(), 10).map_err(|_| Error::INVALID_PARAMS)?;
+            mt.update_leaf_data_with_proof(index, &w.data.to_vec())
+                .map_err(|e| {
+                    println!("apply_txs update_leaf error {:?}", e);
+                    Error::INTERNAL_ERROR
+                })?;
+        }
+
+        roots.push(mt.get_root_hash());
+    }
+
+    if let Some(start) = start {
+        println!("time taken for apply_txs is {:?}", start.elapsed());
+    }
+
+    Ok(roots)
+}
+
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -386,6 +467,7 @@ fn main() -> std::io::Result<()> {
         .with_method("get_leaf", get_leaf)
         .with_method("update_record", update_record)
         .with_method("get_record", get_record)
+        .with_method("apply_txs", apply_txs)
         .finish();
 
     actix_web::rt::System::new().block_on(
