@@ -14,11 +14,13 @@ use zkwasm_host_circuits::constants::MERKLE_DEPTH;
 
 use std::sync::OnceLock;
 use std::time::Instant;
+use std::sync::Mutex;
 
 //use tokio::runtime::Runtime;
 
 static mut DB: Option<Rc<RefCell<dyn TreeDB>>> = None;
 static LOG_CSM_LATENCY: OnceLock<bool> = OnceLock::new();
+static RPC_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn log_csm_latency() -> bool {
     *LOG_CSM_LATENCY.get_or_init(|| {
@@ -26,6 +28,10 @@ fn log_csm_latency() -> bool {
             .ok()
             .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
     })
+}
+
+fn rpc_lock() -> &'static Mutex<()> {
+    RPC_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -69,6 +75,7 @@ async fn update_leaf(Params(request): Params<UpdateLeafRequest>) -> Result<[u8; 
     };
     let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
     let hash = actix_web::web::block(move || {
+        let _guard = rpc_lock().lock().expect("rpc lock poisoned");
         let mut mt = get_mt(request.root);
         mt.update_leaf_data_with_proof(index, &request.data.to_vec())
             .map_err(|e| {
@@ -93,6 +100,7 @@ async fn get_leaf(Params(request): Params<GetLeafRequest>) -> Result<[u8; 32], E
     };
     let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
     let leaf = actix_web::web::block(move || {
+        let _guard = rpc_lock().lock().expect("rpc lock poisoned");
         let mt = get_mt(request.root);
         let (leaf, _) = mt.get_leaf_with_proof(index).map_err(|e| {
             println!("get leaf error {:?}", e);
@@ -111,6 +119,7 @@ async fn get_leaf(Params(request): Params<GetLeafRequest>) -> Result<[u8; 32], E
 }
 async fn update_record(Params(request): Params<UpdateRecordRequest>) -> Result<(), Error> {
     let _ = actix_web::web::block(move || {
+        let _guard = rpc_lock().lock().expect("rpc lock poisoned");
         let mut mongo_datahash = MongoDataHash::construct([0; 32], unsafe { DB.clone() });
         mongo_datahash.update_record({
             DataHashRecord {
@@ -134,6 +143,7 @@ async fn update_record(Params(request): Params<UpdateRecordRequest>) -> Result<(
 
 async fn get_record(Params(request): Params<GetRecordRequest>) -> Result<Vec<String>, Error> {
     let datahashrecord = actix_web::web::block(move || {
+        let _guard = rpc_lock().lock().expect("rpc lock poisoned");
         let mongo_datahash = MongoDataHash::construct([0; 32], unsafe { DB.clone() });
         mongo_datahash.get_record(&request.hash).unwrap()
     })
