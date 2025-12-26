@@ -514,6 +514,7 @@ version = "0.1.0"
 dependencies = [
  "actix-rt",
  "actix-web",
+ "anyhow",
  "clap",
  "ff 0.12.1",
  "hex",

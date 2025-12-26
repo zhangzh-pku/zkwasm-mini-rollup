@@ -1,5 +1,9 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use jsonrpc_v2::{Data, Error, Params, Server};
@@ -10,6 +14,7 @@ use zkwasm_host_circuits::host::datahash::MongoDataHash;
 use zkwasm_host_circuits::host::db::RocksDB;
 use zkwasm_host_circuits::host::db::TreeDB;
 use zkwasm_host_circuits::host::merkle::MerkleTree;
+use zkwasm_host_circuits::host::mongomerkle::MerkleRecord;
 use zkwasm_host_circuits::host::mongomerkle::MongoMerkle;
 use zkwasm_host_circuits::constants::MERKLE_DEPTH;
 
@@ -19,6 +24,8 @@ use std::time::Instant;
 
 static DB: OnceLock<RocksDB> = OnceLock::new();
 static LOG_CSM_LATENCY: OnceLock<bool> = OnceLock::new();
+static SESSIONS: OnceLock<Mutex<HashMap<String, Arc<Mutex<OverlayState>>>>> = OnceLock::new();
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 fn log_csm_latency() -> bool {
     *LOG_CSM_LATENCY.get_or_init(|| {
@@ -28,38 +35,192 @@ fn log_csm_latency() -> bool {
     })
 }
 
+#[derive(Default)]
+struct OverlayState {
+    merkle: HashMap<[u8; 32], Option<MerkleRecord>>,
+    data: HashMap<[u8; 32], Option<DataHashRecord>>,
+}
+
+#[derive(Clone)]
+struct SessionDB {
+    base: RocksDB,
+    overlay: Arc<Mutex<OverlayState>>,
+}
+
+impl TreeDB for SessionDB {
+    fn get_merkle_record(&self, hash: &[u8; 32]) -> Result<Option<MerkleRecord>, anyhow::Error> {
+        let guard = self
+            .overlay
+            .lock()
+            .map_err(|_| anyhow::anyhow!("overlay lock poisoned"))?;
+        if let Some(record) = guard.merkle.get(hash) {
+            return Ok(record.clone());
+        }
+        drop(guard);
+        self.base.get_merkle_record(hash)
+    }
+
+    fn set_merkle_record(&mut self, record: MerkleRecord) -> Result<(), anyhow::Error> {
+        let mut guard = self
+            .overlay
+            .lock()
+            .map_err(|_| anyhow::anyhow!("overlay lock poisoned"))?;
+        guard.merkle.insert(record.hash, Some(record));
+        Ok(())
+    }
+
+    fn set_merkle_records(&mut self, records: &Vec<MerkleRecord>) -> Result<(), anyhow::Error> {
+        let mut guard = self
+            .overlay
+            .lock()
+            .map_err(|_| anyhow::anyhow!("overlay lock poisoned"))?;
+        for record in records {
+            guard.merkle.insert(record.hash, Some(record.clone()));
+        }
+        Ok(())
+    }
+
+    fn get_data_record(&self, hash: &[u8; 32]) -> Result<Option<DataHashRecord>, anyhow::Error> {
+        let guard = self
+            .overlay
+            .lock()
+            .map_err(|_| anyhow::anyhow!("overlay lock poisoned"))?;
+        if let Some(record) = guard.data.get(hash) {
+            return Ok(record.clone());
+        }
+        drop(guard);
+        self.base.get_data_record(hash)
+    }
+
+    fn set_data_record(&mut self, record: DataHashRecord) -> Result<(), anyhow::Error> {
+        let mut guard = self
+            .overlay
+            .lock()
+            .map_err(|_| anyhow::anyhow!("overlay lock poisoned"))?;
+        guard.data.insert(record.hash, Some(record));
+        Ok(())
+    }
+
+    fn start_record(&mut self, _record_db: RocksDB) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("SessionDB does not support record"))
+    }
+
+    fn stop_record(&mut self) -> anyhow::Result<RocksDB> {
+        Err(anyhow::anyhow!("SessionDB does not support record"))
+    }
+
+    fn is_recording(&self) -> bool {
+        false
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct UpdateLeafRequest {
+    session: Option<String>,
     root: [u8; 32],
     data: [u8; 32],
     index: String, // u64 encoding
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct GetLeafRequest {
+    session: Option<String>,
     root: [u8; 32],
     index: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct UpdateRecordRequest {
+    session: Option<String>,
     hash: [u8; 32],
     data: Vec<String>, // vec u64 string
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct GetRecordRequest {
+    session: Option<String>,
     hash: [u8; 32],
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct PingRequest {}
 
-fn get_mt(root: [u8; 32]) -> MongoMerkle<32> {
+#[derive(Clone, Deserialize, Serialize)]
+pub struct BeginSessionRequest {}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct DropSessionRequest {
+    session: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ResetSessionRequest {
+    session: String,
+}
+
+fn sessions() -> &'static Mutex<HashMap<String, Arc<Mutex<OverlayState>>>> {
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_db(session: Option<String>) -> Result<Rc<RefCell<dyn TreeDB>>, Error> {
     let db = DB.get().expect("DB not initialized").clone();
-    let db: Rc<RefCell<dyn TreeDB>> = Rc::new(RefCell::new(db));
-    MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], root, Some(db))
+    if let Some(session) = session {
+        let overlay = sessions()
+            .lock()
+            .map_err(|_| Error::INTERNAL_ERROR)?
+            .get(&session)
+            .cloned();
+        let Some(overlay) = overlay else {
+            return Err(Error::INVALID_PARAMS);
+        };
+        let db = SessionDB { base: db, overlay };
+        Ok(Rc::new(RefCell::new(db)))
+    } else {
+        Ok(Rc::new(RefCell::new(db)))
+    }
+}
+
+fn get_mt(root: [u8; 32], session: Option<String>) -> Result<MongoMerkle<32>, Error> {
+    let db = get_db(session)?;
+    Ok(MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], root, Some(db)))
 }
 
 async fn ping(Params(_request): Params<PingRequest>) -> Result<bool, Error> {
+    Ok(true)
+}
+
+async fn begin_session(Params(_request): Params<BeginSessionRequest>) -> Result<String, Error> {
+    let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    let session = format!("s{id}");
+    let overlay = Arc::new(Mutex::new(OverlayState::default()));
+    sessions()
+        .lock()
+        .map_err(|_| Error::INTERNAL_ERROR)?
+        .insert(session.clone(), overlay);
+    Ok(session)
+}
+
+async fn drop_session(Params(request): Params<DropSessionRequest>) -> Result<bool, Error> {
+    let removed = sessions()
+        .lock()
+        .map_err(|_| Error::INTERNAL_ERROR)?
+        .remove(&request.session)
+        .is_some();
+    Ok(removed)
+}
+
+async fn reset_session(Params(request): Params<ResetSessionRequest>) -> Result<bool, Error> {
+    let overlay = sessions()
+        .lock()
+        .map_err(|_| Error::INTERNAL_ERROR)?
+        .get(&request.session)
+        .cloned();
+    let Some(overlay) = overlay else {
+        return Err(Error::INVALID_PARAMS);
+    };
+    let mut guard = overlay
+        .lock()
+        .map_err(|_| Error::INTERNAL_ERROR)?;
+    guard.merkle.clear();
+    guard.data.clear();
     Ok(true)
 }
 
@@ -71,7 +232,7 @@ async fn update_leaf(Params(request): Params<UpdateLeafRequest>) -> Result<[u8; 
     };
     let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
     let hash = actix_web::web::block(move || {
-        let mut mt = get_mt(request.root);
+        let mut mt = get_mt(request.root, request.session)?;
         mt.update_leaf_data_with_proof(index, &request.data.to_vec())
             .map_err(|e| {
                 println!("update leaf data with proof error {:?}", e);
@@ -95,7 +256,7 @@ async fn get_leaf(Params(request): Params<GetLeafRequest>) -> Result<[u8; 32], E
     };
     let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
     let leaf = actix_web::web::block(move || {
-        let mt = get_mt(request.root);
+        let mt = get_mt(request.root, request.session)?;
         let (leaf, _) = mt.get_leaf_with_proof(index).map_err(|e| {
             println!("get leaf error {:?}", e);
             Error::INTERNAL_ERROR
@@ -112,12 +273,11 @@ async fn get_leaf(Params(request): Params<GetLeafRequest>) -> Result<[u8; 32], E
     })
 }
 async fn update_record(Params(request): Params<UpdateRecordRequest>) -> Result<(), Error> {
-    let _ = actix_web::web::block(move || {
-        let db = DB.get().expect("DB not initialized").clone();
-        let db: Rc<RefCell<dyn TreeDB>> = Rc::new(RefCell::new(db));
+    actix_web::web::block(move || -> Result<(), Error> {
+        let db = get_db(request.session)?;
         let mut mongo_datahash = MongoDataHash::construct([0; 32], Some(db));
-        mongo_datahash.update_record({
-            DataHashRecord {
+        mongo_datahash
+            .update_record(DataHashRecord {
                 hash: request.hash,
                 data: request
                     .data
@@ -128,23 +288,29 @@ async fn update_record(Params(request): Params<UpdateRecordRequest>) -> Result<(
                     })
                     .flatten()
                     .collect::<Vec<u8>>(),
-            }
-        })
+            })
+            .map_err(|e| {
+                println!("update record error {:?}", e);
+                Error::INTERNAL_ERROR
+            })?;
+        Ok(())
     })
     .await
-    .map_err(|_| Error::INTERNAL_ERROR)?;
+    .map_err(|_| Error::INTERNAL_ERROR)??;
     Ok(())
 }
 
 async fn get_record(Params(request): Params<GetRecordRequest>) -> Result<Vec<String>, Error> {
-    let datahashrecord = actix_web::web::block(move || {
-        let db = DB.get().expect("DB not initialized").clone();
-        let db: Rc<RefCell<dyn TreeDB>> = Rc::new(RefCell::new(db));
+    let datahashrecord = actix_web::web::block(move || -> Result<Option<DataHashRecord>, Error> {
+        let db = get_db(request.session)?;
         let mongo_datahash = MongoDataHash::construct([0; 32], Some(db));
-        mongo_datahash.get_record(&request.hash).unwrap()
+        mongo_datahash.get_record(&request.hash).map_err(|e| {
+            println!("get record error {:?}", e);
+            Error::INTERNAL_ERROR
+        })
     })
     .await
-    .map_err(|_| Error::INTERNAL_ERROR)?;
+    .map_err(|_| Error::INTERNAL_ERROR)??;
     let data = datahashrecord.map_or(vec![], |r| {
         r.data
             .chunks_exact(8)
@@ -174,6 +340,9 @@ fn main() -> std::io::Result<()> {
     let rpc = Server::new()
         .with_data(Data::new(String::from("Hello!")))
         .with_method("ping", ping)
+        .with_method("begin_session", begin_session)
+        .with_method("drop_session", drop_session)
+        .with_method("reset_session", reset_session)
         .with_method("update_leaf", update_leaf)
         .with_method("get_leaf", get_leaf)
         .with_method("update_record", update_record)
