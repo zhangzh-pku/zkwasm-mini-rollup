@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use jsonrpc_v2::{Data, Error, Params, Server};
 use serde::Deserialize;
@@ -9,18 +10,15 @@ use zkwasm_host_circuits::host::datahash::MongoDataHash;
 use zkwasm_host_circuits::host::db::RocksDB;
 use zkwasm_host_circuits::host::db::TreeDB;
 use zkwasm_host_circuits::host::merkle::MerkleTree;
-use zkwasm_host_circuits::host::mongomerkle::{MongoMerkle, DEFAULT_HASH_VEC};
+use zkwasm_host_circuits::host::mongomerkle::MongoMerkle;
 use zkwasm_host_circuits::constants::MERKLE_DEPTH;
 
-use std::sync::OnceLock;
 use std::time::Instant;
-use std::sync::Mutex;
 
 //use tokio::runtime::Runtime;
 
-static mut DB: Option<Rc<RefCell<dyn TreeDB>>> = None;
+static DB: OnceLock<RocksDB> = OnceLock::new();
 static LOG_CSM_LATENCY: OnceLock<bool> = OnceLock::new();
-static RPC_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn log_csm_latency() -> bool {
     *LOG_CSM_LATENCY.get_or_init(|| {
@@ -28,10 +26,6 @@ fn log_csm_latency() -> bool {
             .ok()
             .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
     })
-}
-
-fn rpc_lock() -> &'static Mutex<()> {
-    RPC_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -60,7 +54,9 @@ pub struct GetRecordRequest {
 pub struct PingRequest {}
 
 fn get_mt(root: [u8; 32]) -> MongoMerkle<32> {
-    MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], root, unsafe { DB.clone() })
+    let db = DB.get().expect("DB not initialized").clone();
+    let db: Rc<RefCell<dyn TreeDB>> = Rc::new(RefCell::new(db));
+    MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], root, Some(db))
 }
 
 async fn ping(Params(_request): Params<PingRequest>) -> Result<bool, Error> {
@@ -75,7 +71,6 @@ async fn update_leaf(Params(request): Params<UpdateLeafRequest>) -> Result<[u8; 
     };
     let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
     let hash = actix_web::web::block(move || {
-        let _guard = rpc_lock().lock().expect("rpc lock poisoned");
         let mut mt = get_mt(request.root);
         mt.update_leaf_data_with_proof(index, &request.data.to_vec())
             .map_err(|e| {
@@ -100,7 +95,6 @@ async fn get_leaf(Params(request): Params<GetLeafRequest>) -> Result<[u8; 32], E
     };
     let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
     let leaf = actix_web::web::block(move || {
-        let _guard = rpc_lock().lock().expect("rpc lock poisoned");
         let mt = get_mt(request.root);
         let (leaf, _) = mt.get_leaf_with_proof(index).map_err(|e| {
             println!("get leaf error {:?}", e);
@@ -119,8 +113,9 @@ async fn get_leaf(Params(request): Params<GetLeafRequest>) -> Result<[u8; 32], E
 }
 async fn update_record(Params(request): Params<UpdateRecordRequest>) -> Result<(), Error> {
     let _ = actix_web::web::block(move || {
-        let _guard = rpc_lock().lock().expect("rpc lock poisoned");
-        let mut mongo_datahash = MongoDataHash::construct([0; 32], unsafe { DB.clone() });
+        let db = DB.get().expect("DB not initialized").clone();
+        let db: Rc<RefCell<dyn TreeDB>> = Rc::new(RefCell::new(db));
+        let mut mongo_datahash = MongoDataHash::construct([0; 32], Some(db));
         mongo_datahash.update_record({
             DataHashRecord {
                 hash: request.hash,
@@ -143,8 +138,9 @@ async fn update_record(Params(request): Params<UpdateRecordRequest>) -> Result<(
 
 async fn get_record(Params(request): Params<GetRecordRequest>) -> Result<Vec<String>, Error> {
     let datahashrecord = actix_web::web::block(move || {
-        let _guard = rpc_lock().lock().expect("rpc lock poisoned");
-        let mongo_datahash = MongoDataHash::construct([0; 32], unsafe { DB.clone() });
+        let db = DB.get().expect("DB not initialized").clone();
+        let db: Rc<RefCell<dyn TreeDB>> = Rc::new(RefCell::new(db));
+        let mongo_datahash = MongoDataHash::construct([0; 32], Some(db));
         mongo_datahash.get_record(&request.hash).unwrap()
     })
     .await
@@ -172,7 +168,9 @@ struct Args {
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
-    unsafe { DB = Some(Rc::new(RefCell::new(RocksDB::new(args.uri).unwrap()))) };
+    if DB.set(RocksDB::new(args.uri).unwrap()).is_err() {
+        panic!("DB already initialized");
+    }
     let rpc = Server::new()
         .with_data(Data::new(String::from("Hello!")))
         .with_method("ping", ping)
@@ -201,7 +199,7 @@ fn update_leaf_test() {
     let tmp = tempfile::tempdir().unwrap();
     let db = Rc::new(RefCell::new(RocksDB::new(tmp.path()).unwrap()));
 
-    let root = DEFAULT_HASH_VEC[MERKLE_DEPTH];
+    let root = zkwasm_host_circuits::host::mongomerkle::DEFAULT_HASH_VEC[MERKLE_DEPTH];
     let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], root, Some(db));
 
     let index = 2_u64.pow(MERKLE_DEPTH as u32) - 1;
