@@ -406,31 +406,24 @@ async fn apply_txs(Params(request): Params<ApplyTxsRequest>) -> Result<Vec<[u8; 
     };
 
     let db = get_db(request.session)?;
-    let mut mongo_datahash = MongoDataHash::construct([0; 32], Some(db.clone()));
-    let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], request.root, Some(db));
+    let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], request.root, Some(db.clone()));
 
     let mut roots: Vec<[u8; 32]> = Vec::with_capacity(request.txs.len());
+    let mut data_records: Vec<DataHashRecord> = Vec::new();
     for tx in request.txs.iter() {
         for rec in tx.update_records.iter() {
-            mongo_datahash
-                .update_record(DataHashRecord {
-                    hash: rec.hash,
-                    data: rec
-                        .data
-                        .iter()
-                        .map(|x| {
-                            let x = u64::from_str_radix(x, 10).map_err(|_| Error::INVALID_PARAMS)?;
-                            Ok(x.to_le_bytes())
-                        })
-                        .collect::<Result<Vec<[u8; 8]>, Error>>()?
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<u8>>(),
+            let data = rec
+                .data
+                .iter()
+                .map(|x| {
+                    let x = u64::from_str_radix(x, 10).map_err(|_| Error::INVALID_PARAMS)?;
+                    Ok(x.to_le_bytes())
                 })
-                .map_err(|e| {
-                    println!("apply_txs update_record error {:?}", e);
-                    Error::INTERNAL_ERROR
-                })?;
+                .collect::<Result<Vec<[u8; 8]>, Error>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<u8>>();
+            data_records.push(DataHashRecord { hash: rec.hash, data });
         }
 
         for w in tx.writes.iter() {
@@ -443,6 +436,13 @@ async fn apply_txs(Params(request): Params<ApplyTxsRequest>) -> Result<Vec<[u8; 
         }
 
         roots.push(mt.get_root_hash());
+    }
+
+    if !data_records.is_empty() {
+        db.borrow_mut().set_data_records(&data_records).map_err(|e| {
+            println!("apply_txs set_data_records error {:?}", e);
+            Error::INTERNAL_ERROR
+        })?;
     }
 
     if let Some(start) = start {
@@ -460,31 +460,24 @@ async fn apply_txs_final(Params(request): Params<ApplyTxsRequest>) -> Result<[u8
     };
 
     let db = get_db(request.session)?;
-    let mut mongo_datahash = MongoDataHash::construct([0; 32], Some(db.clone()));
-    let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], request.root, Some(db));
+    let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], request.root, Some(db.clone()));
 
     let mut leaf_updates: Vec<(u64, [u8; 32])> = Vec::new();
+    let mut data_records: Vec<DataHashRecord> = Vec::new();
     for tx in request.txs.iter() {
         for rec in tx.update_records.iter() {
-            mongo_datahash
-                .update_record(DataHashRecord {
-                    hash: rec.hash,
-                    data: rec
-                        .data
-                        .iter()
-                        .map(|x| {
-                            let x = u64::from_str_radix(x, 10).map_err(|_| Error::INVALID_PARAMS)?;
-                            Ok(x.to_le_bytes())
-                        })
-                        .collect::<Result<Vec<[u8; 8]>, Error>>()?
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<u8>>(),
+            let data = rec
+                .data
+                .iter()
+                .map(|x| {
+                    let x = u64::from_str_radix(x, 10).map_err(|_| Error::INVALID_PARAMS)?;
+                    Ok(x.to_le_bytes())
                 })
-                .map_err(|e| {
-                    println!("apply_txs_final update_record error {:?}", e);
-                    Error::INTERNAL_ERROR
-                })?;
+                .collect::<Result<Vec<[u8; 8]>, Error>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<u8>>();
+            data_records.push(DataHashRecord { hash: rec.hash, data });
         }
 
         for w in tx.writes.iter() {
@@ -498,6 +491,15 @@ async fn apply_txs_final(Params(request): Params<ApplyTxsRequest>) -> Result<[u8
             println!("apply_txs_final update_leaves_batch error {:?}", e);
             Error::INTERNAL_ERROR
         })?;
+
+    if !data_records.is_empty() {
+        db.borrow_mut()
+            .set_data_records(&data_records)
+            .map_err(|e| {
+                println!("apply_txs_final set_data_records error {:?}", e);
+                Error::INTERNAL_ERROR
+            })?;
+    }
 
     if let Some(start) = start {
         println!("time taken for apply_txs_final is {:?}", start.elapsed());
