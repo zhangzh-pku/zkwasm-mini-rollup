@@ -463,6 +463,7 @@ async fn apply_txs_final(Params(request): Params<ApplyTxsRequest>) -> Result<[u8
     let mut mongo_datahash = MongoDataHash::construct([0; 32], Some(db.clone()));
     let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], request.root, Some(db));
 
+    let mut leaf_updates: Vec<(u64, [u8; 32])> = Vec::new();
     for tx in request.txs.iter() {
         for rec in tx.update_records.iter() {
             mongo_datahash
@@ -488,13 +489,15 @@ async fn apply_txs_final(Params(request): Params<ApplyTxsRequest>) -> Result<[u8
 
         for w in tx.writes.iter() {
             let index = u64::from_str_radix(w.index.as_str(), 10).map_err(|_| Error::INVALID_PARAMS)?;
-            mt.update_leaf_data_with_proof(index, &w.data.to_vec())
-                .map_err(|e| {
-                    println!("apply_txs_final update_leaf error {:?}", e);
-                    Error::INTERNAL_ERROR
-                })?;
+            leaf_updates.push((index, w.data));
         }
     }
+
+    mt.update_leaves_batch(&leaf_updates)
+        .map_err(|e| {
+            println!("apply_txs_final update_leaves_batch error {:?}", e);
+            Error::INTERNAL_ERROR
+        })?;
 
     if let Some(start) = start {
         println!("time taken for apply_txs_final is {:?}", start.elapsed());
