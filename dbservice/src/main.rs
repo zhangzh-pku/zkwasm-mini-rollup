@@ -101,6 +101,17 @@ impl TreeDB for SessionDB {
         Ok(())
     }
 
+    fn set_data_records(&mut self, records: &Vec<DataHashRecord>) -> Result<(), anyhow::Error> {
+        let mut guard = self
+            .overlay
+            .lock()
+            .map_err(|_| anyhow::anyhow!("overlay lock poisoned"))?;
+        for record in records {
+            guard.data.insert(record.hash, Some(record.clone()));
+        }
+        Ok(())
+    }
+
     fn start_record(&mut self, _record_db: RocksDB) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("SessionDB does not support record"))
     }
