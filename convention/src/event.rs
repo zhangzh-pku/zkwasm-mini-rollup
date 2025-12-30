@@ -189,3 +189,68 @@ pub fn insert_event(typ: u64, data: &mut Vec<u64>) {
         EVENTS.append(data);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{EventHandler, EventQueue};
+    use core::slice::IterMut;
+    use zkwasm_rest_abi::StorageData;
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct TestEvent {
+        id: u64,
+        delta: usize,
+    }
+
+    impl EventHandler for TestEvent {
+        fn get_delta(&self) -> usize {
+            self.delta
+        }
+
+        fn progress(&mut self, d: usize) {
+            self.delta = self.delta.saturating_sub(d);
+        }
+
+        fn handle(&mut self, _counter: u64) -> Option<Self> {
+            None
+        }
+
+        fn u64size() -> usize {
+            2
+        }
+    }
+
+    impl StorageData for TestEvent {
+        fn to_data(&self, buf: &mut Vec<u64>) {
+            buf.push(self.id);
+            buf.push(self.delta as u64);
+        }
+
+        fn from_data(u64data: &mut IterMut<u64>) -> Self {
+            let id = *u64data.next().unwrap();
+            let delta = *u64data.next().unwrap() as usize;
+            TestEvent { id, delta }
+        }
+    }
+
+    #[test]
+    fn insert_orders_by_delta_and_adjusts_following() {
+        let mut queue = EventQueue::<TestEvent>::new();
+        queue.insert(TestEvent { id: 1, delta: 5 });
+        queue.insert(TestEvent { id: 2, delta: 2 });
+        queue.insert(TestEvent { id: 3, delta: 7 });
+
+        let deltas: Vec<usize> = queue.list.iter().map(|e| e.get_delta()).collect();
+        assert_eq!(deltas, vec![2, 3, 2]);
+    }
+
+    #[test]
+    fn insert_zero_delta_goes_to_front() {
+        let mut queue = EventQueue::<TestEvent>::new();
+        queue.insert(TestEvent { id: 1, delta: 3 });
+        queue.insert(TestEvent { id: 2, delta: 0 });
+
+        let deltas: Vec<usize> = queue.list.iter().map(|e| e.get_delta()).collect();
+        assert_eq!(deltas, vec![0, 3]);
+    }
+}

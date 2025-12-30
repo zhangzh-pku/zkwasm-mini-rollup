@@ -326,7 +326,7 @@ async fn update_leaf(Params(request): Params<UpdateLeafRequest>) -> Result<[u8; 
     } else {
         None
     };
-    let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
+    let index = u64::from_str_radix(request.index.as_str(), 10).map_err(|_| Error::INVALID_PARAMS)?;
     let mut mt = get_mt(request.root, request.session)?;
     mt.update_leaf_data_with_proof(index, &request.data.to_vec())
         .map_err(|e| {
@@ -346,7 +346,7 @@ async fn get_leaf(Params(request): Params<GetLeafRequest>) -> Result<[u8; 32], E
     } else {
         None
     };
-    let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
+    let index = u64::from_str_radix(request.index.as_str(), 10).map_err(|_| Error::INVALID_PARAMS)?;
     let mt = get_mt(request.root, request.session)?;
     let (leaf, _) = mt.get_leaf_with_proof(index).map_err(|e| {
         println!("get leaf error {:?}", e);
@@ -360,18 +360,15 @@ async fn get_leaf(Params(request): Params<GetLeafRequest>) -> Result<[u8; 32], E
 async fn update_record(Params(request): Params<UpdateRecordRequest>) -> Result<(), Error> {
     let db = get_db(request.session)?;
     let mut mongo_datahash = MongoDataHash::construct([0; 32], Some(db));
+    let mut data = Vec::new();
+    for x in request.data.iter() {
+        let value = u64::from_str_radix(x, 10).map_err(|_| Error::INVALID_PARAMS)?;
+        data.extend_from_slice(&value.to_le_bytes());
+    }
     mongo_datahash
         .update_record(DataHashRecord {
             hash: request.hash,
-            data: request
-                .data
-                .iter()
-                .map(|x| {
-                    let x = u64::from_str_radix(x, 10).unwrap();
-                    x.to_le_bytes()
-                })
-                .flatten()
-                .collect::<Vec<u8>>(),
+            data,
         })
         .map_err(|e| {
             println!("update record error {:?}", e);
@@ -689,4 +686,194 @@ fn apply_txs_final_matches_apply_txs_last_root_and_persists_records() {
     ]
     .concat();
     assert_eq!(record.data, want);
+}
+
+#[test]
+fn session_overlay_commit_persists_records() {
+    use actix_rt::System;
+    use zkwasm_host_circuits::host::mongomerkle::DEFAULT_HASH_VEC;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    init_test_db();
+    sessions().lock().unwrap().clear();
+
+    System::new().block_on(async {
+        let session = expect_ok(begin_session(Params(BeginSessionRequest {})).await);
+        let root = DEFAULT_HASH_VEC[MERKLE_DEPTH];
+        let index = 2_u64.pow(MERKLE_DEPTH as u32) - 1;
+        let data = [9u8; 32];
+
+        let new_root = expect_ok(update_leaf(Params(UpdateLeafRequest {
+            session: Some(session.clone()),
+            root,
+            data,
+            index: index.to_string(),
+        }))
+        .await);
+
+        let leaf = expect_ok(get_leaf(Params(GetLeafRequest {
+            session: Some(session.clone()),
+            root: new_root,
+            index: index.to_string(),
+        }))
+        .await);
+        assert_eq!(leaf, data);
+
+        let hash = [7u8; 32];
+        expect_ok(update_record(Params(UpdateRecordRequest {
+            session: Some(session.clone()),
+            hash,
+            data: vec!["11".to_string(), "22".to_string()],
+        }))
+        .await);
+
+        let commit = expect_ok(commit_session(Params(CommitSessionRequest {
+            session: session.clone(),
+        }))
+        .await);
+        assert!(commit.merkle_records > 0);
+
+        let leaf_after = expect_ok(get_leaf(Params(GetLeafRequest {
+            session: None,
+            root: new_root,
+            index: index.to_string(),
+        }))
+        .await);
+        assert_eq!(leaf_after, data);
+
+        let record_after = expect_ok(get_record(Params(GetRecordRequest { session: None, hash })).await);
+        assert_eq!(record_after, vec!["11".to_string(), "22".to_string()]);
+
+        let dropped = expect_ok(drop_session(Params(DropSessionRequest { session })).await);
+        assert!(dropped);
+    });
+}
+
+#[test]
+fn invalid_index_rejected_in_leaf_endpoints() {
+    use actix_rt::System;
+    use zkwasm_host_circuits::host::mongomerkle::DEFAULT_HASH_VEC;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    init_test_db();
+
+    System::new().block_on(async {
+        let root = DEFAULT_HASH_VEC[MERKLE_DEPTH];
+        let bad_index = "not-a-number".to_string();
+
+        let err = expect_err(update_leaf(Params(UpdateLeafRequest {
+            session: None,
+            root,
+            data: [0u8; 32],
+            index: bad_index.clone(),
+        }))
+        .await);
+        assert_invalid_params(err);
+
+        let err = expect_err(get_leaf(Params(GetLeafRequest {
+            session: None,
+            root,
+            index: bad_index,
+        }))
+        .await);
+        assert_invalid_params(err);
+    });
+}
+
+fn assert_invalid_params(err: Error) {
+    match err {
+        Error::Provided { code, .. } | Error::Full { code, .. } => {
+            assert_eq!(code, -32602);
+        }
+    }
+}
+
+fn expect_ok<T>(res: Result<T, Error>) -> T {
+    match res {
+        Ok(value) => value,
+        Err(_) => panic!("unexpected error"),
+    }
+}
+
+fn expect_err<T>(res: Result<T, Error>) -> Error {
+    match res {
+        Ok(_) => panic!("expected error"),
+        Err(err) => err,
+    }
+}
+
+#[test]
+fn reset_session_clears_overlay_state() {
+    use actix_rt::System;
+    use zkwasm_host_circuits::host::mongomerkle::DEFAULT_HASH_VEC;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    init_test_db();
+    sessions().lock().unwrap().clear();
+
+    System::new().block_on(async {
+        let session = expect_ok(begin_session(Params(BeginSessionRequest {})).await);
+        let root = DEFAULT_HASH_VEC[MERKLE_DEPTH];
+        let index = 2_u64.pow(MERKLE_DEPTH as u32) - 1;
+        let data = [9u8; 32];
+
+        expect_ok(update_leaf(Params(UpdateLeafRequest {
+            session: Some(session.clone()),
+            root,
+            data,
+            index: index.to_string(),
+        }))
+        .await);
+
+        expect_ok(update_record(Params(UpdateRecordRequest {
+            session: Some(session.clone()),
+            hash: [1u8; 32],
+            data: vec!["11".to_string()],
+        }))
+        .await);
+
+        let reset = expect_ok(reset_session(Params(ResetSessionRequest {
+            session: session.clone(),
+        }))
+        .await);
+        assert!(reset);
+
+        let commit = expect_ok(commit_session(Params(CommitSessionRequest { session })).await);
+        assert_eq!(commit.merkle_records, 0);
+        assert_eq!(commit.data_records, 0);
+    });
+}
+
+#[test]
+fn invalid_session_rejected_in_reset_and_commit() {
+    use actix_rt::System;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    init_test_db();
+
+    System::new().block_on(async {
+        let err = expect_err(reset_session(Params(ResetSessionRequest {
+            session: "missing".to_string(),
+        }))
+        .await);
+        assert_invalid_params(err);
+
+        let err = expect_err(commit_session(Params(CommitSessionRequest {
+            session: "missing".to_string(),
+        }))
+        .await);
+        assert_invalid_params(err);
+    });
+}
+
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn init_test_db() {
+    if DB.get().is_some() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    std::mem::forget(dir);
+    let _ = DB.set(RocksDB::new(path).unwrap());
 }

@@ -100,3 +100,48 @@ impl PoseidonContext {
         self.generator.gen()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PoseidonContext;
+    use crate::poseidon::POSEIDON_HASHER;
+    use halo2curves::ff::PrimeField;
+
+    #[test]
+    fn poseidon_new_resets_buffer_between_rounds() {
+        let mut ctx = PoseidonContext::default(0);
+        ctx.poseidon_new(1);
+        let mut guard = 0;
+        while ctx.buf.is_empty() && guard < 128 {
+            ctx.poseidon_push(1);
+            guard += 1;
+        }
+        ctx.poseidon_new(1);
+        assert!(ctx.buf.is_empty());
+        assert_eq!(ctx.used_round, 2);
+
+        let mut guard = 0;
+        while ctx.buf.len() < 8 && guard < 1024 {
+            ctx.poseidon_push(1);
+            guard += 1;
+        }
+        assert_eq!(ctx.buf.len(), 8);
+
+        let mut hasher = POSEIDON_HASHER.clone();
+        let out = hasher.update_exact(&ctx.buf.clone().try_into().unwrap());
+        let bytes = out.to_repr();
+        for chunk in bytes.chunks(8) {
+            let limb = u64::from_le_bytes(chunk.try_into().unwrap());
+            assert_eq!(ctx.poseidon_finalize(), limb);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn poseidon_finalize_panics_without_full_buffer() {
+        let mut ctx = PoseidonContext::default(0);
+        ctx.poseidon_new(1);
+        ctx.poseidon_push(1);
+        ctx.poseidon_finalize();
+    }
+}

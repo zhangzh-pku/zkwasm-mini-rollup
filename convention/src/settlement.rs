@@ -22,4 +22,42 @@ impl SettlementInfo {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::SettlementInfo;
+    use zkwasm_rest_abi::WithdrawInfo;
+
+    #[test]
+    fn flush_settlement_clears_buffer_and_preserves_order() {
+        let first = WithdrawInfo {
+            feature: 1,
+            address: [0x11; 20],
+            amount: 9,
+        };
+        let second = WithdrawInfo {
+            feature: 2,
+            address: [0x22; 20],
+            amount: 10,
+        };
+
+        SettlementInfo::append_settlement(first);
+        SettlementInfo::append_settlement(second);
+
+        let bytes = SettlementInfo::flush_settlement();
+        assert_eq!(bytes.len(), 64);
+
+        let first_feature = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let first_amount = u64::from_be_bytes(bytes[24..32].try_into().unwrap());
+        assert_eq!(first_feature, 1);
+        assert_eq!(first_amount, 9);
+
+        let second_feature = u32::from_le_bytes(bytes[32..36].try_into().unwrap());
+        let second_amount = u64::from_be_bytes(bytes[56..64].try_into().unwrap());
+        assert_eq!(second_feature, 2);
+        assert_eq!(second_amount, 10);
+
+        let empty = SettlementInfo::flush_settlement();
+        assert!(empty.is_empty());
+    }
+}
 

@@ -91,3 +91,20 @@ impl CacheContext {
 }
 
 impl CacheContext {}
+
+#[cfg(test)]
+mod tests {
+    use super::CacheContext;
+
+    #[test]
+    fn fetch_data_returns_length_then_fifo_values() {
+        let mut ctx = CacheContext::new();
+        ctx.data = vec![10, 20, 30];
+
+        let len = ctx.fetch_data();
+        assert_eq!(len, 3);
+        assert_eq!(ctx.fetch_data(), 10);
+        assert_eq!(ctx.fetch_data(), 20);
+        assert_eq!(ctx.fetch_data(), 30);
+    }
+}

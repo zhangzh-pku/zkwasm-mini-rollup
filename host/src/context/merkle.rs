@@ -110,3 +110,41 @@ impl MerkleContext {
 }
 
 impl MerkleContext {}
+
+#[cfg(test)]
+mod tests {
+    use super::MerkleContext;
+
+    #[test]
+    fn merkle_setroot_and_getroot_round_trip() {
+        let mut ctx = MerkleContext::new(0);
+        let root_bytes = [0xABu8; 32];
+        let mut words = [0u64; 4];
+        for (i, chunk) in root_bytes.chunks(8).enumerate() {
+            words[i] = u64::from_le_bytes(chunk.try_into().unwrap());
+        }
+        for word in words {
+            ctx.merkle_setroot(word);
+        }
+
+        let mut out = [0u64; 4];
+        for idx in 0..4 {
+            out[idx] = ctx.merkle_getroot();
+        }
+        assert_eq!(out, words);
+    }
+
+    #[test]
+    fn merkle_address_resets_fetch_state() {
+        let mut ctx = MerkleContext::new(0);
+        ctx.fetch = true;
+        ctx.data_cursor = 3;
+        ctx.data = [1, 2, 3, 4];
+
+        ctx.merkle_address(7);
+
+        assert_eq!(ctx.fetch, false);
+        assert_eq!(ctx.data_cursor, 0);
+        assert_eq!(ctx.data, [0, 0, 0, 0]);
+    }
+}

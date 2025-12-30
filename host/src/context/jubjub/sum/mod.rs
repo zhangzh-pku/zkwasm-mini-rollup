@@ -100,3 +100,29 @@ impl BabyJubjubSumContext {
         self.result_limbs = Some(limbs);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{BabyJubjubSumContext, LIMBNB};
+
+    #[test]
+    fn babyjubjub_sum_resets_input_cursor_after_full_chunk() {
+        let mut ctx = BabyJubjubSumContext::default(0);
+        ctx.babyjubjub_sum_new(1);
+        for v in 0..(LIMBNB * 2 + 4) {
+            ctx.babyjubjub_sum_push(v as u64);
+        }
+        assert_eq!(ctx.input_cursor, 0);
+        assert_eq!(ctx.limbs.len(), LIMBNB * 2);
+        assert_eq!(ctx.coeffs.len(), 4);
+    }
+
+    #[test]
+    #[should_panic]
+    fn babyjubjub_sum_finalize_panics_without_full_limbs() {
+        let mut ctx = BabyJubjubSumContext::default(0);
+        ctx.babyjubjub_sum_new(1);
+        ctx.babyjubjub_sum_push(1);
+        ctx.babyjubjub_sum_finalize();
+    }
+}
