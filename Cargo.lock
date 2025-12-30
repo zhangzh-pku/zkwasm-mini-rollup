@@ -2660,6 +2660,7 @@ dependencies = [
  "poseidon 0.2.0",
  "rand",
  "rand_core",
+ "rayon",
  "ripemd",
  "rocksdb",
  "serde",

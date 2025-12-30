@@ -572,3 +572,121 @@ fn update_leaf_test() {
     assert_eq!(leaf.data.unwrap_or([0; 32]), data);
     assert!(mt.verify_proof(&leaf_proof).unwrap());
 }
+
+#[test]
+fn apply_txs_final_matches_apply_txs_last_root_and_persists_records() {
+    let root = zkwasm_host_circuits::host::mongomerkle::DEFAULT_HASH_VEC[MERKLE_DEPTH];
+    // The Merkle API uses "node index" (heap indexing), where leaf indices are in:
+    // [2^DEPTH - 1, 2^(DEPTH+1) - 2].
+    let first_leaf = 2_u64.pow(MERKLE_DEPTH as u32) - 1;
+    let index_a = first_leaf;
+    let index_b = first_leaf + 1;
+    let data1 = [1u8; 32];
+    let data2 = [2u8; 32];
+    let data3 = [3u8; 32];
+    let rec_hash = [7u8; 32];
+
+    let txs = vec![
+        ApplyTxTrace {
+            writes: vec![ApplyLeafWrite {
+                index: index_a.to_string(),
+                data: data1,
+            }],
+            update_records: vec![ApplyRecordUpdate {
+                hash: rec_hash,
+                data: vec!["11".to_string(), "22".to_string()],
+            }],
+        },
+        ApplyTxTrace {
+            writes: vec![
+                ApplyLeafWrite {
+                    index: index_a.to_string(),
+                    data: data2,
+                },
+                ApplyLeafWrite {
+                    index: index_b.to_string(),
+                    data: data3,
+                },
+            ],
+            update_records: vec![ApplyRecordUpdate {
+                hash: rec_hash,
+                data: vec!["33".to_string(), "44".to_string()],
+            }],
+        },
+    ];
+
+    let expected_last_root = {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(tmp.path()).unwrap()));
+        let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], root, Some(db.clone()));
+
+        let mut data_records: Vec<DataHashRecord> = Vec::new();
+        let mut roots: Vec<[u8; 32]> = Vec::with_capacity(txs.len());
+        for tx in txs.iter() {
+            for rec in tx.update_records.iter() {
+                let data = rec
+                    .data
+                    .iter()
+                    .map(|x| u64::from_str_radix(x, 10).unwrap().to_le_bytes())
+                    .flatten()
+                    .collect::<Vec<u8>>();
+                data_records.push(DataHashRecord {
+                    hash: rec.hash,
+                    data,
+                });
+            }
+            for w in tx.writes.iter() {
+                let index = u64::from_str_radix(&w.index, 10).unwrap();
+                mt.update_leaf_data_with_proof(index, &w.data.to_vec())
+                    .unwrap();
+            }
+            roots.push(mt.get_root_hash());
+        }
+
+        db.borrow_mut().set_data_records(&data_records).unwrap();
+        *roots.last().unwrap()
+    };
+
+    let (final_root, db) = {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Rc::new(RefCell::new(RocksDB::new(tmp.path()).unwrap()));
+        let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], root, Some(db.clone()));
+
+        let mut leaf_updates: Vec<(u64, [u8; 32])> = Vec::new();
+        let mut data_records: Vec<DataHashRecord> = Vec::new();
+        for tx in txs.iter() {
+            for rec in tx.update_records.iter() {
+                let data = rec
+                    .data
+                    .iter()
+                    .map(|x| u64::from_str_radix(x, 10).unwrap().to_le_bytes())
+                    .flatten()
+                    .collect::<Vec<u8>>();
+                data_records.push(DataHashRecord {
+                    hash: rec.hash,
+                    data,
+                });
+            }
+            for w in tx.writes.iter() {
+                let index = u64::from_str_radix(&w.index, 10).unwrap();
+                leaf_updates.push((index, w.data));
+            }
+        }
+
+        mt.update_leaves_batch(&leaf_updates).unwrap();
+        db.borrow_mut().set_data_records(&data_records).unwrap();
+
+        (mt.get_root_hash(), db)
+    };
+
+    assert_eq!(final_root, expected_last_root);
+
+    let mongo_datahash = MongoDataHash::construct([0; 32], Some(db));
+    let record = mongo_datahash.get_record(&rec_hash).unwrap().unwrap();
+    let want = [
+        33u64.to_le_bytes().to_vec(),
+        44u64.to_le_bytes().to_vec(),
+    ]
+    .concat();
+    assert_eq!(record.data, want);
+}
