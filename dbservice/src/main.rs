@@ -49,7 +49,7 @@ async fn update_leaf(Params(request): Params<UpdateLeafRequest>) -> Result<[u8; 
     let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
     let hash = actix_web::web::block(move || {
         let mut mt = get_mt(request.root);
-        mt.update_leaf_data_with_proof(index, &request.data.to_vec())
+        mt.update_leaf_data_with_proof_raw(index, &request.data)
             .map_err(|e| {
                 println!("update leaf data with proof error {:?}", e);
                 Error::INTERNAL_ERROR
@@ -178,7 +178,7 @@ fn update_leaf_test() {
     let index = u64::from_str_radix(request.index.as_str(), 10).unwrap();
     let mut mt = MongoMerkle::<MERKLE_DEPTH>::construct([0; 32], request.root, None);
     println!("update leaf processing ");
-    mt.update_leaf_data_with_proof(index, &request.data.to_vec())
+    mt.update_leaf_data_with_proof_raw(index, &request.data)
         .unwrap();
     println!("update leaf done");
 }
